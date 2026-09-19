@@ -1,6 +1,6 @@
 ## Project Summary
 
-A simple node js application to generate unique quotes
+A simple node js application to generate unique quotes.
 
 ## Run locally
 
