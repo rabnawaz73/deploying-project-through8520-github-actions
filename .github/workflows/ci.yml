@@ -32,24 +32,26 @@ jobs:
 
       - name: Configure AWS credentials
         if: github.event_name == 'push'
+        id: aws_credentials
+        continue-on-error: true
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
 
       - name: Setup Terraform
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.aws_credentials.outcome == 'success'
         uses: hashicorp/setup-terraform@v3
 
       - name: Provision deployment infrastructure
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.aws_credentials.outcome == 'success'
         working-directory: terraform
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false
 
       - name: Read deployment outputs
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.aws_credentials.outcome == 'success'
         id: terraform
         working-directory: terraform
         run: |
@@ -57,12 +59,12 @@ jobs:
           echo "ubuntu_instance_id=$(terraform output -raw ubuntu_instance_id)" >> "$GITHUB_OUTPUT"
 
       - name: Login to Amazon ECR
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.aws_credentials.outcome == 'success'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push Docker image
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.aws_credentials.outcome == 'success'
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           REPOSITORY: ${{ steps.terraform.outputs.ecr_repository_url }}
@@ -74,7 +76,7 @@ jobs:
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
       - name: Deploy image to EC2 through SSM
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.aws_credentials.outcome == 'success'
         env:
           INSTANCE_ID: ${{ steps.terraform.outputs.ubuntu_instance_id }}
         run: |
