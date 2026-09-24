@@ -1,4 +1,3 @@
-```yaml
 name: CI and Deploy
 
 on:
@@ -21,35 +20,20 @@ jobs:
       TF_BACKEND_KEY: motivation-quote-generator/terraform.tfstate
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout
-      # ---------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Node.js
-      # ---------------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # ---------------------------------------------------------
-      # 3. Install dependencies
-      # ---------------------------------------------------------
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      # ---------------------------------------------------------
-      # 4. Check Node.js syntax
-      # ---------------------------------------------------------
       - name: Start server check
         run: node --check server.js
 
-      # ---------------------------------------------------------
-      # 5. Configure AWS credentials through GitHub OIDC
-      # ---------------------------------------------------------
       - name: Configure AWS credentials
         if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
@@ -57,27 +41,15 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
 
-      # ---------------------------------------------------------
-      # 6. Verify AWS identity
-      # ---------------------------------------------------------
       - name: Verify AWS identity
         if: github.event_name == 'push'
         run: |
           aws sts get-caller-identity
 
-      # ---------------------------------------------------------
-      # 7. Setup Terraform
-      # ---------------------------------------------------------
       - name: Setup Terraform
         if: github.event_name == 'push'
         uses: hashicorp/setup-terraform@v3
 
-      # ---------------------------------------------------------
-      # 8. Bootstrap Terraform backend
-      #
-      # The backend bucket must exist BEFORE terraform init.
-      # Terraform itself cannot create its own backend bucket.
-      # ---------------------------------------------------------
       - name: Bootstrap Terraform backend
         if: github.event_name == 'push'
         run: |
@@ -87,11 +59,8 @@ jobs:
 
           if aws s3api head-bucket \
             --bucket "$TF_BACKEND_BUCKET" 2>/dev/null; then
-
             echo "Terraform backend bucket already exists."
-
           else
-
             echo "Terraform backend bucket does not exist."
             echo "Creating: $TF_BACKEND_BUCKET"
 
@@ -121,18 +90,12 @@ jobs:
             echo "Terraform backend bucket created."
           fi
 
-      # ---------------------------------------------------------
-      # 9. Terraform init
-      # ---------------------------------------------------------
       - name: Terraform Init
         if: github.event_name == 'push'
         working-directory: terraform
         run: |
           terraform init -input=false
 
-      # ---------------------------------------------------------
-      # 10. Terraform format and validation
-      # ---------------------------------------------------------
       - name: Terraform Format Check
         if: github.event_name == 'push'
         working-directory: terraform
@@ -145,29 +108,12 @@ jobs:
         run: |
           terraform validate
 
-      # ---------------------------------------------------------
-      # 11. Import existing AWS resources
-      #
-      # IMPORTANT:
-      # These imports only happen when:
-      #   1. The resource exists in AWS
-      #   2. The resource is NOT already in Terraform state
-      #
-      # This prevents "already exists" errors.
-      # ---------------------------------------------------------
       - name: Import existing AWS resources
         if: github.event_name == 'push'
         working-directory: terraform
         run: |
           set -e
 
-          echo "=================================================="
-          echo "Checking existing AWS resources"
-          echo "=================================================="
-
-          # -----------------------------------------------------
-          # Helper function
-          # -----------------------------------------------------
           import_if_needed() {
             ADDRESS="$1"
             ID="$2"
@@ -183,13 +129,9 @@ jobs:
             fi
 
             echo "Importing $ADDRESS -> $ID"
-
             terraform import -input=false "$ADDRESS" "$ID"
           }
 
-          # -----------------------------------------------------
-          # ECR repository
-          # -----------------------------------------------------
           ECR_REPO_ID="$(
             aws ecr describe-repositories \
               --repository-names motivation-quote-generator \
@@ -201,13 +143,8 @@ jobs:
             ECR_REPO_ID=""
           fi
 
-          import_if_needed \
-            "aws_ecr_repository.app" \
-            "$ECR_REPO_ID"
+          import_if_needed "aws_ecr_repository.app" "$ECR_REPO_ID"
 
-          # -----------------------------------------------------
-          # CloudWatch log group
-          # -----------------------------------------------------
           LOG_GROUP_ID="$(
             aws logs describe-log-groups \
               --log-group-name-prefix "/ecs/motivation-quote-generator" \
@@ -219,58 +156,32 @@ jobs:
             LOG_GROUP_ID=""
           fi
 
-          import_if_needed \
-            "aws_cloudwatch_log_group.app" \
-            "$LOG_GROUP_ID"
+          import_if_needed "aws_cloudwatch_log_group.app" "$LOG_GROUP_ID"
 
-          # -----------------------------------------------------
-          # ECS execution IAM role
-          # -----------------------------------------------------
           ECS_ROLE_NAME="motivation-quote-generator-execution-role"
 
-          if aws iam get-role \
-            --role-name "$ECS_ROLE_NAME" >/dev/null 2>&1; then
-
-            import_if_needed \
-              "aws_iam_role.ecs_execution_role" \
-              "$ECS_ROLE_NAME"
+          if aws iam get-role --role-name "$ECS_ROLE_NAME" >/dev/null 2>&1; then
+            import_if_needed "aws_iam_role.ecs_execution_role" "$ECS_ROLE_NAME"
           else
             echo "ECS execution role does not exist."
           fi
 
-          # -----------------------------------------------------
-          # EC2 deployment IAM role
-          # -----------------------------------------------------
           EC2_ROLE_NAME="motivation-quote-generator-ec2-deployment-role"
 
-          if aws iam get-role \
-            --role-name "$EC2_ROLE_NAME" >/dev/null 2>&1; then
-
-            import_if_needed \
-              "aws_iam_role.ec2_deployment" \
-              "$EC2_ROLE_NAME"
+          if aws iam get-role --role-name "$EC2_ROLE_NAME" >/dev/null 2>&1; then
+            import_if_needed "aws_iam_role.ec2_deployment" "$EC2_ROLE_NAME"
           else
             echo "EC2 deployment role does not exist."
           fi
 
-          # -----------------------------------------------------
-          # EC2 deployment instance profile
-          # -----------------------------------------------------
           INSTANCE_PROFILE_NAME="motivation-quote-generator-ec2-deployment-profile"
 
-          if aws iam get-instance-profile \
-            --instance-profile-name "$INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
-
-            import_if_needed \
-              "aws_iam_instance_profile.ec2_deployment" \
-              "$INSTANCE_PROFILE_NAME"
+          if aws iam get-instance-profile --instance-profile-name "$INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
+            import_if_needed "aws_iam_instance_profile.ec2_deployment" "$INSTANCE_PROFILE_NAME"
           else
             echo "EC2 deployment instance profile does not exist."
           fi
 
-          # -----------------------------------------------------
-          # ALB security group
-          # -----------------------------------------------------
           ALB_SG_ID="$(
             aws ec2 describe-security-groups \
               --filters \
@@ -284,13 +195,8 @@ jobs:
             ALB_SG_ID=""
           fi
 
-          import_if_needed \
-            "aws_security_group.alb" \
-            "$ALB_SG_ID"
+          import_if_needed "aws_security_group.alb" "$ALB_SG_ID"
 
-          # -----------------------------------------------------
-          # ALB target group
-          # -----------------------------------------------------
           TARGET_GROUP_ARN="$(
             aws elbv2 describe-target-groups \
               --names motivation-quote-generator-tg \
@@ -302,22 +208,11 @@ jobs:
             TARGET_GROUP_ARN=""
           fi
 
-          import_if_needed \
-            "aws_lb_target_group.app" \
-            "$TARGET_GROUP_ARN"
+          import_if_needed "aws_lb_target_group.app" "$TARGET_GROUP_ARN"
 
-          echo "=================================================="
           echo "Terraform state after imports"
-          echo "=================================================="
-
           terraform state list
 
-      # ---------------------------------------------------------
-      # 12. Import existing Terraform state bucket if present
-      #
-      # This is separate because the backend bucket and the
-      # Terraform-managed bucket are currently different concepts.
-      # ---------------------------------------------------------
       - name: Check Terraform state resources
         if: github.event_name == 'push'
         working-directory: terraform
@@ -325,9 +220,6 @@ jobs:
           echo "Current Terraform state:"
           terraform state list || true
 
-      # ---------------------------------------------------------
-      # 13. Terraform plan
-      # ---------------------------------------------------------
       - name: Terraform Plan
         if: github.event_name == 'push'
         working-directory: terraform
@@ -336,9 +228,6 @@ jobs:
             -input=false \
             -out=tfplan
 
-      # ---------------------------------------------------------
-      # 14. Terraform apply
-      # ---------------------------------------------------------
       - name: Provision deployment infrastructure
         if: github.event_name == 'push'
         working-directory: terraform
@@ -348,9 +237,6 @@ jobs:
             -auto-approve \
             tfplan
 
-      # ---------------------------------------------------------
-      # 15. Read deployment outputs
-      # ---------------------------------------------------------
       - name: Read deployment outputs
         if: github.event_name == 'push'
         id: terraform
@@ -359,17 +245,11 @@ jobs:
           echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
           echo "ubuntu_instance_id=$(terraform output -raw ubuntu_instance_id)" >> "$GITHUB_OUTPUT"
 
-      # ---------------------------------------------------------
-      # 16. Login to ECR
-      # ---------------------------------------------------------
       - name: Login to Amazon ECR
         if: github.event_name == 'push'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ---------------------------------------------------------
-      # 17. Build and push Docker image
-      # ---------------------------------------------------------
       - name: Build and push Docker image
         if: github.event_name == 'push'
         env:
@@ -392,9 +272,6 @@ jobs:
 
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
-      # ---------------------------------------------------------
-      # 18. Wait for EC2 to become available in SSM
-      # ---------------------------------------------------------
       - name: Wait for EC2 SSM
         if: github.event_name == 'push'
         env:
@@ -405,7 +282,6 @@ jobs:
           echo "Waiting for EC2 instance $INSTANCE_ID to become available in SSM..."
 
           for attempt in {1..30}; do
-
             STATUS=$(
               aws ssm describe-instance-information \
                 --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
@@ -428,9 +304,6 @@ jobs:
             sleep 10
           done
 
-      # ---------------------------------------------------------
-      # 19. Deploy Docker image to EC2 through SSM
-      # ---------------------------------------------------------
       - name: Deploy image to EC2 through SSM
         if: github.event_name == 'push'
         env:
@@ -457,4 +330,3 @@ jobs:
             --instance-id "$INSTANCE_ID"
 
           echo "Deployment completed successfully."
-```
