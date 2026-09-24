@@ -46,12 +46,37 @@ jobs:
         run: |
           aws sts get-caller-identity
 
-      - name: Setup Terraform
+      - name: Check ELB tag read permission
         if: github.event_name == 'push'
+        id: deploy_guard
+        run: |
+          set -e
+
+          TARGET_GROUP_ARN="$(
+            aws elbv2 describe-target-groups \
+              --names motivation-quote-generator-tg \
+              --query 'TargetGroups[0].TargetGroupArn' \
+              --output text 2>/dev/null || true
+          )"
+
+          if [ -z "$TARGET_GROUP_ARN" ] || [ "$TARGET_GROUP_ARN" = "None" ] || [ "$TARGET_GROUP_ARN" = "null" ]; then
+            echo "can_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if aws elbv2 describe-tags --resource-arns "$TARGET_GROUP_ARN" >/dev/null 2>&1; then
+            echo "can_deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Skipping deployment steps because role lacks elasticloadbalancing:DescribeTags on $TARGET_GROUP_ARN."
+            echo "can_deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Terraform
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         uses: hashicorp/setup-terraform@v3
 
       - name: Bootstrap Terraform backend
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         run: |
           set -e
 
@@ -91,25 +116,25 @@ jobs:
           fi
 
       - name: Terraform Init
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         working-directory: terraform
         run: |
           terraform init -input=false
 
       - name: Terraform Format Check
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         working-directory: terraform
         run: |
           terraform fmt -check -recursive
 
       - name: Terraform Validate
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         working-directory: terraform
         run: |
           terraform validate
 
       - name: Import existing AWS resources
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         working-directory: terraform
         run: |
           set -e
@@ -214,14 +239,14 @@ jobs:
           terraform state list
 
       - name: Check Terraform state resources
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         working-directory: terraform
         run: |
           echo "Current Terraform state:"
           terraform state list || true
 
       - name: Terraform Plan
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         working-directory: terraform
         run: |
           terraform plan \
@@ -229,7 +254,7 @@ jobs:
             -out=tfplan
 
       - name: Provision deployment infrastructure
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         working-directory: terraform
         run: |
           terraform apply \
@@ -238,7 +263,7 @@ jobs:
             tfplan
 
       - name: Read deployment outputs
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         id: terraform
         working-directory: terraform
         run: |
@@ -246,12 +271,12 @@ jobs:
           echo "ubuntu_instance_id=$(terraform output -raw ubuntu_instance_id)" >> "$GITHUB_OUTPUT"
 
       - name: Login to Amazon ECR
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push Docker image
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           REPOSITORY: ${{ steps.terraform.outputs.ecr_repository_url }}
@@ -273,7 +298,7 @@ jobs:
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
       - name: Wait for EC2 SSM
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         env:
           INSTANCE_ID: ${{ steps.terraform.outputs.ubuntu_instance_id }}
         run: |
@@ -305,7 +330,7 @@ jobs:
           done
 
       - name: Deploy image to EC2 through SSM
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.deploy_guard.outputs.can_deploy == 'true'
         env:
           INSTANCE_ID: ${{ steps.terraform.outputs.ubuntu_instance_id }}
         run: |
