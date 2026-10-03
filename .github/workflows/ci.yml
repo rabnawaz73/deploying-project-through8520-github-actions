@@ -1,4 +1,4 @@
-name: CI and Deploy
+name: CI - Build and Push to ECR
 
 on:
   push:
@@ -16,24 +16,29 @@ jobs:
 
     env:
       AWS_REGION: us-east-1
-      TF_BACKEND_BUCKET: motivation-quote-generator-terraform-state-d870542d
-      TF_BACKEND_KEY: motivation-quote-generator/terraform.tfstate
+      ECR_REPOSITORY: motivation-quote-generator
 
     steps:
+      # 1. Checkout source code
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2. Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      # 3. Install dependencies
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Start server check
+      # 4. Check Node.js application
+      - name: Check server.js
         run: node --check server.js
 
+      # 5. Configure AWS credentials using OIDC
+      # Only needed for pushes to main
       - name: Configure AWS credentials
         if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
@@ -41,292 +46,36 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
 
+      # 6. Verify AWS authentication
       - name: Verify AWS identity
         if: github.event_name == 'push'
         run: |
           aws sts get-caller-identity
 
-      - name: Setup Terraform
-        if: github.event_name == 'push'
-        uses: hashicorp/setup-terraform@v3
-
-      - name: Bootstrap Terraform backend
-        if: github.event_name == 'push'
-        run: |
-          set -e
-
-          echo "Checking Terraform backend bucket..."
-
-          if aws s3api head-bucket \
-            --bucket "$TF_BACKEND_BUCKET" 2>/dev/null; then
-            echo "Terraform backend bucket already exists."
-          else
-            echo "Terraform backend bucket does not exist."
-            echo "Creating: $TF_BACKEND_BUCKET"
-
-            aws s3api create-bucket \
-              --bucket "$TF_BACKEND_BUCKET" \
-              --region "$AWS_REGION"
-
-            aws s3api put-bucket-versioning \
-              --bucket "$TF_BACKEND_BUCKET" \
-              --versioning-configuration Status=Enabled
-
-            aws s3api put-bucket-encryption \
-              --bucket "$TF_BACKEND_BUCKET" \
-              --server-side-encryption-configuration \
-              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-
-            aws s3api put-public-access-block \
-              --bucket "$TF_BACKEND_BUCKET" \
-              --public-access-block-configuration \
-              '{
-                "BlockPublicAcls": true,
-                "BlockPublicPolicy": true,
-                "IgnorePublicAcls": true,
-                "RestrictPublicBuckets": true
-              }'
-
-            echo "Terraform backend bucket created."
-          fi
-
-      - name: Terraform Init
-        if: github.event_name == 'push'
-        working-directory: terraform
-        run: |
-          terraform init -input=false
-
-      - name: Terraform Format Check
-        if: github.event_name == 'push'
-        working-directory: terraform
-        run: |
-          terraform fmt -check -recursive
-
-      - name: Terraform Validate
-        if: github.event_name == 'push'
-        working-directory: terraform
-        run: |
-          terraform validate
-
-      - name: Import existing AWS resources
-        if: github.event_name == 'push'
-        working-directory: terraform
-        run: |
-          set -e
-
-          import_if_needed() {
-            ADDRESS="$1"
-            ID="$2"
-
-            if terraform state list | grep -Fxq "$ADDRESS"; then
-              echo "Already in Terraform state: $ADDRESS"
-              return 0
-            fi
-
-            if [ -z "$ID" ] || [ "$ID" = "None" ] || [ "$ID" = "null" ]; then
-              echo "No existing AWS resource found for: $ADDRESS"
-              return 0
-            fi
-
-            echo "Importing $ADDRESS -> $ID"
-            terraform import -input=false "$ADDRESS" "$ID"
-          }
-
-          ECR_REPO_ID="$(
-            aws ecr describe-repositories \
-              --repository-names motivation-quote-generator \
-              --query 'repositories[0].repositoryName' \
-              --output text 2>/dev/null || true
-          )"
-
-          if [ "$ECR_REPO_ID" = "None" ]; then
-            ECR_REPO_ID=""
-          fi
-
-          import_if_needed "aws_ecr_repository.app" "$ECR_REPO_ID"
-
-          LOG_GROUP_ID="$(
-            aws logs describe-log-groups \
-              --log-group-name-prefix "/ecs/motivation-quote-generator" \
-              --query 'logGroups[?logGroupName==`/ecs/motivation-quote-generator`].logGroupName | [0]' \
-              --output text 2>/dev/null || true
-          )"
-
-          if [ "$LOG_GROUP_ID" = "None" ]; then
-            LOG_GROUP_ID=""
-          fi
-
-          import_if_needed "aws_cloudwatch_log_group.app" "$LOG_GROUP_ID"
-
-          ECS_ROLE_NAME="motivation-quote-generator-execution-role"
-
-          if aws iam get-role --role-name "$ECS_ROLE_NAME" >/dev/null 2>&1; then
-            import_if_needed "aws_iam_role.ecs_execution_role" "$ECS_ROLE_NAME"
-          else
-            echo "ECS execution role does not exist."
-          fi
-
-          EC2_ROLE_NAME="motivation-quote-generator-ec2-deployment-role"
-
-          if aws iam get-role --role-name "$EC2_ROLE_NAME" >/dev/null 2>&1; then
-            import_if_needed "aws_iam_role.ec2_deployment" "$EC2_ROLE_NAME"
-          else
-            echo "EC2 deployment role does not exist."
-          fi
-
-          INSTANCE_PROFILE_NAME="motivation-quote-generator-ec2-deployment-profile"
-
-          if aws iam get-instance-profile --instance-profile-name "$INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
-            import_if_needed "aws_iam_instance_profile.ec2_deployment" "$INSTANCE_PROFILE_NAME"
-          else
-            echo "EC2 deployment instance profile does not exist."
-          fi
-
-          ALB_SG_ID="$(
-            aws ec2 describe-security-groups \
-              --filters \
-                "Name=group-name,Values=motivation-quote-generator-alb-sg" \
-                "Name=vpc-id,Values=vpc-067c468cf50887557" \
-              --query 'SecurityGroups[0].GroupId' \
-              --output text 2>/dev/null || true
-          )"
-
-          if [ "$ALB_SG_ID" = "None" ]; then
-            ALB_SG_ID=""
-          fi
-
-          import_if_needed "aws_security_group.alb" "$ALB_SG_ID"
-
-          TARGET_GROUP_ARN="$(
-            aws elbv2 describe-target-groups \
-              --names motivation-quote-generator-tg \
-              --query 'TargetGroups[0].TargetGroupArn' \
-              --output text 2>/dev/null || true
-          )"
-
-          if [ "$TARGET_GROUP_ARN" = "None" ]; then
-            TARGET_GROUP_ARN=""
-          fi
-
-          import_if_needed "aws_lb_target_group.app" "$TARGET_GROUP_ARN"
-
-          echo "Terraform state after imports"
-          terraform state list
-
-      - name: Check Terraform state resources
-        if: github.event_name == 'push'
-        working-directory: terraform
-        run: |
-          echo "Current Terraform state:"
-          terraform state list || true
-
-      - name: Terraform Plan
-        if: github.event_name == 'push'
-        working-directory: terraform
-        run: |
-          terraform plan \
-            -input=false \
-            -out=tfplan
-
-      - name: Provision deployment infrastructure
-        if: github.event_name == 'push'
-        working-directory: terraform
-        run: |
-          terraform apply \
-            -input=false \
-            -auto-approve \
-            tfplan
-
-      - name: Read deployment outputs
-        if: github.event_name == 'push'
-        id: terraform
-        working-directory: terraform
-        run: |
-          echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
-          echo "ubuntu_instance_id=$(terraform output -raw ubuntu_instance_id)" >> "$GITHUB_OUTPUT"
-
+      # 7. Login to ECR
       - name: Login to Amazon ECR
         if: github.event_name == 'push'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
+      # 8. Build Docker image
+      - name: Build Docker image
         if: github.event_name == 'push'
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
-          REPOSITORY: ${{ steps.terraform.outputs.ecr_repository_url }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          set -e
-
-          IMAGE_URI="$REPOSITORY:$IMAGE_TAG"
-
-          echo "Building:"
-          echo "$IMAGE_URI"
-
           docker build \
-            --tag "$IMAGE_URI" \
+            --tag "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            --tag "$REGISTRY/$ECR_REPOSITORY:latest" \
             .
 
-          docker push "$IMAGE_URI"
-
-          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
-
-      - name: Wait for EC2 SSM
+      # 9. Push Docker image to ECR
+      - name: Push Docker image to ECR
         if: github.event_name == 'push'
         env:
-          INSTANCE_ID: ${{ steps.terraform.outputs.ubuntu_instance_id }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          set -e
-
-          echo "Waiting for EC2 instance $INSTANCE_ID to become available in SSM..."
-
-          for attempt in {1..30}; do
-            STATUS=$(
-              aws ssm describe-instance-information \
-                --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-                --query "InstanceInformationList[0].PingStatus" \
-                --output text 2>/dev/null || true
-            )
-
-            echo "Attempt $attempt: SSM status = $STATUS"
-
-            if [ "$STATUS" = "Online" ]; then
-              echo "EC2 instance is online in SSM."
-              break
-            fi
-
-            if [ "$attempt" -eq 30 ]; then
-              echo "EC2 instance did not become available in SSM." >&2
-              exit 1
-            fi
-
-            sleep 10
-          done
-
-      - name: Deploy image to EC2 through SSM
-        if: github.event_name == 'push'
-        env:
-          INSTANCE_ID: ${{ steps.terraform.outputs.ubuntu_instance_id }}
-        run: |
-          set -e
-
-          echo "Deploying $IMAGE_URI to $INSTANCE_ID"
-
-          COMMAND_ID=$(
-            aws ssm send-command \
-              --instance-ids "$INSTANCE_ID" \
-              --document-name "AWS-RunShellScript" \
-              --comment "Deploy ${GITHUB_SHA}" \
-              --parameters "commands=sudo /usr/local/bin/deploy-app $IMAGE_URI" \
-              --query "Command.CommandId" \
-              --output text
-          )
-
-          echo "SSM Command ID: $COMMAND_ID"
-
-          aws ssm wait command-executed \
-            --command-id "$COMMAND_ID" \
-            --instance-id "$INSTANCE_ID"
-
-          echo "Deployment completed successfully."
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
